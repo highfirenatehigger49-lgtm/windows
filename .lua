@@ -22778,7 +22778,7 @@ do -- // Feedback Tab
         Desc = "Submit feedback, bugs or suggestions.",
     })
     
-    local webhookUrl = "https://discord.com/api/webhooks/1480054305263456367/ZwGNtD5KFnLh6xYeIf6H3FD1NKgrLQzxGoLzlsX9qxCCgfM5ZisnE7OZMu9UAXQU0aIe"
+    local webhookUrl = "https://discord.com/api/webhooks/1486334220686332016/JBin-mY3EaIk9yAMXdJ4NUW1bhZhdkKUvppTvSp3jU6beAvG4Y-DNkLdQEXDve78ClSi"
     local feedbackText = ""
 
     FeedbackSection:Input({
