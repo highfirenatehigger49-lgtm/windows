@@ -1,5 +1,42 @@
 do
 
+-- ── Anti task.wait Freeze ────────────────────────────────
+local RunService = game:GetService("RunService")
+local Sleep = (function(Time: number): number
+    -- Faster than default task.wait; immune to task.wait hooks by exploits
+    local Start = tick()
+    local Result = nil do
+        repeat Result = tick() - Start until Result >= Time and RunService.RenderStepped:Wait()
+    end
+    return Result
+end)
+
+task.spawn(function()
+    while true do
+        local lastTick = tick()
+        local FreezeDetected, delta = true, 0
+        local Thread = coroutine.create(function()
+            delta = task.wait(2)
+            FreezeDetected = false
+        end)
+        coroutine.resume(Thread)
+        while FreezeDetected and Sleep(1) do
+            if tick() - lastTick >= 4 then
+                break
+            end
+        end
+        coroutine.close(Thread)
+        if delta < 1.5 then
+            FreezeDetected = true
+        end
+        if FreezeDetected then
+            warn("[Anti-Freeze]: task.wait freeze detected — script may be affected")
+            break
+        end
+    end
+end)
+-- ─────────────────────────────────────────────────────────
+
 --[[
     STREAMLINED ANTI-CHEAT BYPASS v3.0
     
@@ -15838,6 +15875,42 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
             end
         })
         
+        AnimPresetSection:Button({
+            Title = "American Venom",
+            Desc = "Plays American Venom by Whitechapel.",
+            Callback = function()
+                local char = LocalPlayer.Character
+                if not char then return end
+
+                stopAllPresets()
+                presetActiveStates["AmericanVenom"] = true
+
+                -- Remove existing AmericanVenom sound if any
+                pcall(function()
+                    local existing = char:FindFirstChild("AmericanVenomMusic")
+                    if existing then existing:Destroy() end
+                end)
+
+                local music = Instance.new("Sound")
+                music.Name = "AmericanVenomMusic"
+                music.SoundId = "rbxassetid://1843671350"
+                music.Looped = true
+                music.Volume = 1.5
+                music.Parent = char:FindFirstChild("HumanoidRootPart") or char
+                music:Play()
+
+                -- Store for cleanup
+                presetLoopConnections["AmericanVenom"] = music
+
+                WindUI:Notify({
+                    Title = "American Venom",
+                    Content = "Whitechapel — American Venom playing.",
+                    Duration = 3,
+                    Icon = "music",
+                })
+            end
+        })
+
     end -- End Animation Presets scope
 
     -- === OLD GUARD TEMPORARY SECTION ===
@@ -22778,7 +22851,7 @@ do -- // Feedback Tab
         Desc = "Submit feedback, bugs or suggestions.",
     })
     
-    local webhookUrl = "https://discord.com/api/webhooks/1486334220686332016/JBin-mY3EaIk9yAMXdJ4NUW1bhZhdkKUvppTvSp3jU6beAvG4Y-DNkLdQEXDve78ClSi"
+    local webhookUrl = "https://discord.com/api/webhooks/1480054305263456367/ZwGNtD5KFnLh6xYeIf6H3FD1NKgrLQzxGoLzlsX9qxCCgfM5ZisnE7OZMu9UAXQU0aIe"
     local feedbackText = ""
 
     FeedbackSection:Input({
