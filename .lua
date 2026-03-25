@@ -1,42 +1,5 @@
 do
 
--- ── Anti task.wait Freeze ────────────────────────────────
-local RunService = game:GetService("RunService")
-local Sleep = (function(Time: number): number
-    -- Faster than default task.wait; immune to task.wait hooks by exploits
-    local Start = tick()
-    local Result = nil do
-        repeat Result = tick() - Start until Result >= Time and RunService.RenderStepped:Wait()
-    end
-    return Result
-end)
-
-task.spawn(function()
-    while true do
-        local lastTick = tick()
-        local FreezeDetected, delta = true, 0
-        local Thread = coroutine.create(function()
-            delta = task.wait(2)
-            FreezeDetected = false
-        end)
-        coroutine.resume(Thread)
-        while FreezeDetected and Sleep(1) do
-            if tick() - lastTick >= 4 then
-                break
-            end
-        end
-        coroutine.close(Thread)
-        if delta < 1.5 then
-            FreezeDetected = true
-        end
-        if FreezeDetected then
-            warn("[Anti-Freeze]: task.wait freeze detected — script may be affected")
-            break
-        end
-    end
-end)
--- ─────────────────────────────────────────────────────────
-
 --[[
     STREAMLINED ANTI-CHEAT BYPASS v3.0
     
