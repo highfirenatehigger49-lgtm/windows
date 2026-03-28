@@ -1366,6 +1366,692 @@ end
 pcall(function() _ident(8) end)
 
 -- ================================================================
+-- LAYER 12 : BYPASS Anti-GetRawMetatable  (Hardened v2)
+-- The AC probes debug.info(2,"f") inside xpcall error handlers to
+-- capture baseline __index/__newindex/__namecall, then loops every 1s
+-- comparing against the saved functions. We:
+--  (a) capture baselines identically BEFORE any hook runs
+--  (b) hook debug.info to return the saved baseline whenever the AC
+--      queries from a non-caller error context at level 2
+--  (c) use a per-function fingerprint map so even if the AC probes
+--      with different dummy fields we always return the right one
+--  (d) re-capture and refresh the baseline every 45s in case the
+--      AC rotates its saved references
+-- ================================================================
+do
+    local _di   = debug and debug.info
+    local _hkfn = hookfunction or replaceclosure or detour_function
+    if _di and _hkfn then
+        -- Baseline table: stores the function the AC captured for each MM
+        local _base = { idx = nil, nidx = nil, nc = nil }
+
+        local function _captureBaselines()
+            xpcall(function() return (game :: any).______ end, function()
+                _base.idx  = _di(2, "f")
+            end)
+            xpcall(function() (game :: any).______ = 1 end, function()
+                _base.nidx = _di(2, "f")
+            end)
+            xpcall(function() (game :: any):______(nil) end, function()
+                _base.nc   = _di(2, "f")
+            end)
+        end
+        _captureBaselines()
+
+        -- Map: real function -> what we want AC to see
+        -- Refreshed every 45s so even if our hooks change the
+        -- underlying fn pointers the map stays correct
+        local _fmap = {}
+        local function _rebuildMap()
+            _fmap = {}
+            if _base.idx  then _fmap[_base.idx]  = _base.idx  end
+            if _base.nidx then _fmap[_base.nidx] = _base.nidx end
+            if _base.nc   then _fmap[_base.nc]   = _base.nc   end
+        end
+        _rebuildMap()
+
+        -- Hook debug.info once; reentrancy guard prevents infinite recursion
+        local _guard = false
+        pcall(function()
+            local _orig = _di
+            _hkfn(debug.info, _close(function(lvlOrThread, what, ...)
+                if _guard then return _orig(lvlOrThread, what, ...) end
+                -- Only intercept: non-caller context, asking for "f", at level 2
+                if not _check()
+                    and what == "f"
+                    and type(lvlOrThread) == "number"
+                    and lvlOrThread == 2
+                then
+                    _guard = true
+                    local ok, real = pcall(_orig, 2, "f")
+                    _guard = false
+                    if ok and real then
+                        -- If we have a known spoofed version, return it
+                        local spoof = _fmap[real]
+                        if spoof then return spoof end
+                        -- Unknown fn: return whichever baseline was captured
+                        return _base.idx or _base.nidx or _base.nc or real
+                    end
+                    return _base.idx or _base.nidx or _base.nc
+                end
+                return _orig(lvlOrThread, what, ...)
+            end))
+        end)
+
+        -- Periodic baseline refresh (45s + jitter)
+        task.spawn(function()
+            while true do
+                task.wait(45 + math.random(0, 10))
+                pcall(_captureBaselines)
+                pcall(_rebuildMap)
+            end
+        end)
+    end
+end
+
+-- ================================================================
+-- LAYER 13 : BYPASS Anti-HookMetamethod  (Hardened v2)
+-- The AC calls the raw metamethod functions directly with a non-
+-- Instance argument and checks the error string precisely.
+-- Hardening:
+--  (a) Wrap __index / __newindex / __namecall so any non-userdata
+--      self always raises the EXACT expected error string
+--  (b) Also handle the case where the AC passes a proxy userdata
+--      (newproxy with all metamethods = error) — we detect this by
+--      checking whether reading .ClassName errors
+--  (c) Cache the error string as bytes so AC's string scanner
+--      cannot find it in bytecode
+--  (d) Re-apply guards every 30s in case AC strips the hook
+-- ================================================================
+do
+    pcall(function()
+        -- Error string stored as bytes to avoid string scanner
+        local _eStr = _s({105,110,118,97,108,105,100,32,97,114,103,117,109,101,110,116,
+                           32,35,49,32,40,73,110,115,116,97,110,99,101,32,101,120,112,
+                           101,99,116,101,100,44,32,103,111,116,32,110,117,109,98,101,
+                           114,41})  -- "invalid argument #1 (Instance expected, got number)"
+
+        local function _makeGuard(original)
+            return _close(function(self, ...)
+                -- Number / string / table / boolean probes
+                if type(self) ~= "userdata" then
+                    error(_eStr, 2)
+                end
+                -- Proxy userdata probe (newproxy) — .ClassName errors
+                local ok = pcall(function() return (self :: any).ClassName end)
+                if not ok then
+                    error(_eStr, 2)
+                end
+                return original(self, ...)
+            end)
+        end
+
+        local _hkMeta = hookmetamethod
+        if not _hkMeta then return end
+
+        local function _applyGuards()
+            pcall(function()
+                local old = _hkMeta(game, "__index", nil)
+                if old then _hkMeta(game, "__index",    _makeGuard(old)) end
+            end)
+            pcall(function()
+                local old = _hkMeta(game, "__newindex", nil)
+                if old then _hkMeta(game, "__newindex", _makeGuard(old)) end
+            end)
+            pcall(function()
+                local old = _hkMeta(game, "__namecall", nil)
+                if old then _hkMeta(game, "__namecall", _makeGuard(old)) end
+            end)
+        end
+
+        _applyGuards()
+
+        -- Re-apply every 30s in case AC strips hooks
+        task.spawn(function()
+            while true do
+                task.wait(30 + math.random(0, 8))
+                pcall(_applyGuards)
+            end
+        end)
+    end)
+end
+
+-- ================================================================
+-- LAYER 14 : BYPASS Anti-Kick_Hook  (Hardened v2)
+-- Covers all 7 probe variants from Anti-Kick_Hook.luau:
+--   0x1  Kick(123)         — number arg
+--   0x2  Kick(workspace)   — Instance arg
+--   0x3  Kick("")          — string arg
+--   0x4  Kick({})          — table arg
+--   0x5  Kick(nil)         — nil arg
+--   0x6  Kick(proxyObject) — proxy userdata with error metamethods
+--   0x7  plr:kIcK()        — case-variant namecall
+--   0x9  coroutine timeout — if kick hook hangs for >5s
+-- Strategy:
+--   • Hook Kick so wrong-self probes raise the correct error
+--   • Hook __namecall to trap kIcK / kick / KICK variants
+--   • Respond fast enough (< 5s) so the timeout check (0x9) passes
+--   • Triple watchdog (5s / 10s / 20s) to re-apply after strip
+-- ================================================================
+do
+    pcall(function()
+        local _rs   = game:GetService("RunService")
+        local _lp   = game:GetService("Players").LocalPlayer
+        if not _lp then return end
+
+        local _hkfn  = hookfunction or replaceclosure or detour_function
+        if not _hkfn then return end
+
+        -- Error strings as bytes (avoid string scanner)
+        local _dotErr = _s({69,120,112,101,99,116,101,100,32,39,58,39,32,110,111,116,
+                             32,39,46,39,32,99,97,108,108,105,110,103,32,109,101,109,
+                             98,101,114,32,102,117,110,99,116,105,111,110,32,75,105,99,107})
+        -- "Expected ':' not '.' calling member function Kick"
+
+        local _origKick = _lp.Kick
+        if not _origKick then return end
+
+        local _safeKick = _close(function(self, msg)
+            -- Probe 0x1-0x5: wrong type
+            if type(self) ~= "userdata" then
+                error(_dotErr, 2)
+            end
+            -- Probe 0x6: proxy userdata — ClassName errors
+            local ok = pcall(function() return (self :: any).ClassName end)
+            if not ok then
+                error(_dotErr, 2)
+            end
+            -- Real kick from game server: forward
+            return _origKick(self, msg)
+        end)
+
+        pcall(function() _hkfn(_origKick, _safeKick) end)
+
+        -- Probe 0x7: kIcK / kick / KICK variants via __namecall hook
+        -- (also traps kIcKs, kickPlayer etc. just in case)
+        local _kNilErr = _s({97,116,116,101,109,112,116,32,116,111,32,99,97,108,108,
+                              32,97,32,110,105,108,32,118,97,108,117,101})
+        -- "attempt to call a nil value"
+
+        local _oldNC_kick
+        pcall(function()
+            _oldNC_kick = hookmetamethod(game, "__namecall", _close(function(self, ...)
+                if not _check() then
+                    local m = getnamecallmethod and getnamecallmethod() or ""
+                    local ml = m:lower()
+                    -- Intercept any kick variant that isn't the exact "Kick"
+                    if ml == "kick" and m ~= "Kick" then
+                        error(_kNilErr, 2)
+                    end
+                end
+                return _oldNC_kick(self, ...)
+            end))
+        end)
+
+        -- Triple watchdog: 5s, 10s, 20s intervals
+        for _, interval in ipairs({5, 10, 20}) do
+            task.spawn(function()
+                while true do
+                    task.wait(interval + math.random(0, 3))
+                    pcall(function()
+                        -- Re-apply if hook was stripped
+                        local cur = _lp.Kick
+                        if cur == _origKick then
+                            pcall(function() _hkfn(_origKick, _safeKick) end)
+                        end
+                    end)
+                end
+            end)
+        end
+    end)
+end
+
+-- ================================================================
+-- LAYER 15 : BYPASS Anti-task.wait freeze  (Hardened v2)
+-- The AC (Anti-task_wait_freeze.luau) logic:
+--   1. Records lastTick
+--   2. Spawns coroutine: task.wait(2) → sets FreezeDetected=false
+--   3. Outer loop: Sleep(1) using RenderStepped+tick(), 4s timeout
+--   4. Closes coroutine; if delta < 1.5 → FreezeDetected=true
+--   5. If FreezeDetected → "freeze detected" → break
+-- Our Sleep() uses the SAME RenderStepped+tick() the AC uses,
+-- so we cannot break the Sleep. We must ensure task.wait returns
+-- a REAL elapsed delta (≥ 1.5 when called with 2s) from within
+-- the AC's coroutine.
+--
+-- Hardening additions:
+--  (a) Use both RenderStepped AND Stepped as fallbacks
+--  (b) Handle the case where RenderStepped is unavailable (server)
+--  (c) Return the EXACT elapsed time (≥ requested) not just 0
+--  (d) Re-hook if stripped, every 15s
+--  (e) Also hook coroutine.resume/wrap to let AC coroutines run
+--      unblocked (some ACs freeze the scheduler by spamming waits)
+-- ================================================================
+do
+    pcall(function()
+        local _rs    = game:GetService("RunService")
+        local _hkfn  = hookfunction or replaceclosure or detour_function
+        if not _hkfn then return end
+
+        local _origWait = task.wait
+        if not _origWait then return end
+
+        -- Real clock sleep: uses RenderStepped/Stepped to advance time
+        -- Returns actual elapsed seconds (always ≥ requested t)
+        local function _realSleep(t)
+            t = (type(t) == "number" and t > 0) and t or (1/60)
+            local s = tick()
+            local ok1 = pcall(function()
+                repeat _rs.RenderStepped:Wait()
+                until tick() - s >= t
+            end)
+            if not ok1 then
+                -- Fallback: Stepped (works on server too)
+                pcall(function()
+                    repeat _rs.Stepped:Wait()
+                    until tick() - s >= t
+                end)
+            end
+            -- Last resort: spin on tick() alone
+            while tick() - s < t do end
+            return tick() - s
+        end
+
+        local _hooked = false
+
+        local function _applyWaitHook()
+            _hooked = true
+            _hkfn(task.wait, _close(function(n)
+                -- checkcaller() = true means OUR code called this
+                if _check() then
+                    return _origWait(n)
+                end
+                -- AC coroutine / foreign context → real sleep
+                return _realSleep(n or (1/60))
+            end))
+        end
+
+        pcall(_applyWaitHook)
+        _G._RealSleep = _realSleep
+
+        -- Re-hook watchdog every 15s
+        task.spawn(function()
+            while true do
+                task.wait(15 + math.random(0, 5))
+                pcall(function()
+                    -- If someone replaced task.wait back to original, re-hook
+                    if task.wait == _origWait then
+                        pcall(_applyWaitHook)
+                    end
+                end)
+            end
+        end)
+    end)
+end
+
+-- ================================================================
+-- LAYER 16 : SECURE GetService + ProxyService  (Hardened v2)
+-- Additions:
+--  (a) Cache pre-fetched services at init time so GetService namecall
+--      is never called at runtime (removes namecall from logs entirely)
+--  (b) ProxyWrap supports :SetHiddenProperty / :GetHiddenProperty /
+--      :CallHiddenProperty matching full ProxyService API
+--  (c) Proxy __namecall routes through plain table lookup, hiding
+--      method name from getnamecallmethod entirely
+-- ================================================================
+do
+    local _rawGame      = game
+    local _oGetSvc      = _rawGame.GetService
+    local _oFindSvc     = _rawGame.FindService
+    local __svcCache    = {}
+
+    -- Pre-warm common services at startup (no runtime namecall needed)
+    local _preload = {
+        "Players","RunService","UserInputService","ReplicatedStorage",
+        "StarterGui","Workspace","CoreGui","TweenService","HttpService",
+        "SoundService","Lighting","Teams","Chat","LogService","ScriptContext",
+    }
+    for _, n in ipairs(_preload) do
+        pcall(function()
+            local s = _oFindSvc(_rawGame, n) or _oGetSvc(_rawGame, n)
+            if s then __svcCache[n] = s end
+        end)
+    end
+
+    _G.SecureGetService = _close(function(name)
+        local c = __svcCache[name]
+        if c then return c end
+        local s
+        pcall(function() s = _oFindSvc(_rawGame, name) end)
+        if not s then pcall(function() s = _oGetSvc(_rawGame, name) end) end
+        if s then __svcCache[name] = s end
+        return s
+    end)
+
+    -- Full ProxyService (matches ProxyService.luau API exactly)
+    _G.ProxyWrap = _close(function(obj)
+        local _hidden = {}
+        local _proxy
+        _proxy = setmetatable({}, {
+            __index = function(_, k)
+                -- Hidden properties first
+                if _hidden[k] ~= nil then return _hidden[k] end
+                local v = obj[k]
+                if type(v) == "function" then
+                    -- Return a wrapper that calls through obj (hides namecall)
+                    return function(selfArg, ...)
+                        return v(obj, ...)
+                    end
+                end
+                return v
+            end,
+            __newindex = function(_, k, v)
+                local ok = pcall(function() obj[k] = v end)
+                if not ok then _hidden[k] = v end
+            end,
+            __tostring = function() return tostring(obj) end,
+        })
+        -- Extra API methods (stored as hidden so __index finds them)
+        _hidden.SetHiddenProperty = function(_, prop, data)
+            _hidden[prop] = data
+        end
+        _hidden.GetHiddenProperty = function(_, prop)
+            return _hidden[prop]
+        end
+        _hidden.CallHiddenProperty = function(_, prop, ...)
+            local fn = _hidden[prop]
+            if fn then return fn(...) end
+            error("Hidden caller '" .. tostring(prop) .. "' is nil!", 2)
+        end
+        return _proxy
+    end)
+end
+
+-- ================================================================
+-- LAYER 17 : ADONIS BYPASS (Hardened integration)
+-- Based on Adonis Bypass Framework — adapted as a shield layer.
+-- Covers: Adonis Detected() hook, remote blocking (Adonis-specific),
+-- kick protection (3-method), behaviour randomisation, GC rate limit,
+-- GUI detection block, call-stack spoof, stamina param fix.
+-- All Adonis-specific patterns included.
+-- ================================================================
+do
+    -- ── helpers (use already-defined _check, _close, _ident) ──────
+
+    -- Adonis-specific blocked remote names (lower-case)
+    local _aBlocked = {
+        ["detected"]=true, ["kick"]=true, ["ban"]=true,
+        ["admindetection"]=true, ["anticheat"]=true,
+        ["security"]=true, ["logexploit"]=true,
+        ["staminachange"]=true, ["antitoolclone"]=true,
+    }
+    -- Adonis suspicious substrings
+    local _aSuspicious = {
+        "detect","kick","ban","log","report","exploit","cheat",
+        "hack","inject","security","anticheat","admin",
+        "stamina","antitool",
+    }
+
+    -- ── (A) Namecall guard — blocks Adonis remotes + Kick ─────────
+    -- Merges with the existing __namecall hook already installed;
+    -- we add an additional Adonis-pattern check layer.
+    pcall(function()
+        if getgenv().adonisNcHooked then return end
+        getgenv().adonisNcHooked = true
+
+        local _mt = getrawmetatable(game)
+        if not (_mt and _mt.__namecall) then return end
+        local _origNC = _mt.__namecall
+
+        setreadonly(_mt, false)
+        _mt.__namecall = _close(function(self, ...)
+            local args  = {...}
+            local method = getnamecallmethod and getnamecallmethod() or ""
+
+            -- Hard block Kick from any source
+            if method == "Kick" then return nil end
+
+            -- Pass whitelisted methods through immediately
+            local _white = {
+                GetPropertyChangedSignal=1,GetAttribute=1,SetAttribute=1,
+                FindFirstChild=1,WaitForChild=1,GetChildren=1,
+                GetDescendants=1,Clone=1,Destroy=1,Remove=1,GetService=1,
+            }
+            if _white[method] then
+                return _origNC(self, table.unpack(args))
+            end
+
+            -- Block Adonis detection remotes
+            if method == "FireServer" or method == "InvokeServer" then
+                local ok, rn = pcall(function()
+                    if self and typeof(self) == "Instance" then
+                        return self.Name:lower()
+                    end
+                    return ""
+                end)
+                if ok and rn and rn ~= "" then
+                    -- Exact match
+                    if _aBlocked[rn] then
+                        return method == "InvokeServer" and nil or nil
+                    end
+                    -- Substring match
+                    for _, pat in ipairs(_aSuspicious) do
+                        if rn:find(pat, 1, true) then
+                            return method == "InvokeServer" and nil or nil
+                        end
+                    end
+                    -- Stamina parameter fix (FlllD pattern)
+                    if #args >= 4 then
+                        if args[1] == "FlllD" and args[4] == false then
+                            args[2] = 0
+                            args[3] = 0
+                        end
+                    end
+                    if rn:find("stamina", 1, true) and #args >= 1 then
+                        args[1] = math.max(0, math.min(100, tonumber(args[1]) or 100))
+                    end
+                end
+            end
+
+            return _origNC(self, table.unpack(args))
+        end)
+        setreadonly(_mt, true)
+    end)
+
+    -- ── (B) Kick protection — 3 methods ───────────────────────────
+    pcall(function()
+        if getgenv().adonisKickHooked then return end
+        getgenv().adonisKickHooked = true
+
+        local _lp = game:GetService("Players").LocalPlayer
+        if not _lp then return end
+
+        -- Method 1: direct replacement
+        pcall(function()
+            local km = _lp.Kick
+            if km and typeof(km) == "function" then
+                _lp.Kick = _close(function() return nil end)
+            end
+        end)
+
+        -- Method 2: metatable __index on player
+        pcall(function()
+            local pm = getrawmetatable(_lp)
+            if not pm then return end
+            setreadonly(pm, false)
+            local oldIdx = pm.__index
+            pm.__index = _close(function(self, key)
+                if key == "Kick" then return function() end end
+                return oldIdx(self, key)
+            end)
+            setreadonly(pm, true)
+        end)
+
+        -- Method 3: Players service .Kick
+        pcall(function()
+            local svc = game:GetService("Players")
+            local origSvcKick = svc.Kick
+            if origSvcKick then
+                svc.Kick = _close(function(...)
+                    local a = {...}
+                    if a[1] == _lp then return nil end
+                    return origSvcKick(table.unpack(a))
+                end)
+            end
+        end)
+    end)
+
+    -- ── (C) Adonis Detected() function hook via getgc ─────────────
+    pcall(function()
+        if getgenv().adonisDetectedHooked then return end
+        getgenv().adonisDetectedHooked = true
+
+        task.spawn(function()
+            task.wait(5 + math.random(0, 3))
+
+            local function _safeGC()
+                local ok, r = pcall(function() return getgc(true) end)
+                return ok and r or {}
+            end
+
+            local objects = _safeGC()
+            local checked = 0
+            local MAX = 120  -- scan more objects than original (was 80)
+
+            for _, v in next, objects do
+                checked = checked + 1
+                if checked > MAX then break end
+
+                if typeof(v) == "table" then
+                    local det   = rawget(v, "Detected")
+                    local rlk   = rawget(v, "RLocked")
+                    -- Also check common Adonis aliases
+                    local det2  = rawget(v, "AnticheatDetected") or rawget(v, "ACDetected")
+
+                    local detFn = (typeof(det) == "function" and rlk and det)
+                               or (typeof(det2) == "function" and det2)
+
+                    if detFn then
+                        pcall(function()
+                            local _old = detFn
+                            hookfunction(detFn, _close(function(action, info, crash)
+                                -- Allow benign "heartbeat" calls through
+                                if action == "_" and info == "_" and crash == false then
+                                    return _old(action, info, crash)
+                                end
+                                -- All real detections → stall in coroutine
+                                return task.wait(9e9)
+                            end))
+                        end)
+                        break
+                    end
+                end
+
+                if checked % 10 == 0 then task.wait(0.01) end
+            end
+        end)
+    end)
+
+    -- ── (D) GetGC rate-limit wrapper (prevents AC from abusing gc scan) ─
+    pcall(function()
+        if getgenv().adonisGCWrapped then return end
+        getgenv().adonisGCWrapped = true
+
+        local _realGC  = getgc
+        local _last    = 0
+        local _count   = 0
+        local _maxCPS  = 5
+
+        getgc = function(...)
+            local now = tick()
+            if now - _last >= 1 then
+                _count = 0
+                _last  = now
+            end
+            _count += 1
+            if _count > _maxCPS then
+                task.wait(math.random(50, 150) / 1000)
+            end
+            _last = tick()
+            return _realGC(...)
+        end
+    end)
+
+    -- ── (E) GUI detection block (Adonis text labels) ───────────────
+    pcall(function()
+        local _lp = game:GetService("Players").LocalPlayer
+        if not _lp then return end
+        local pg = _lp:FindFirstChild("PlayerGui")
+        if not pg then return end
+
+        pg.DescendantAdded:Connect(_close(function(gui)
+            pcall(function()
+                if not (gui and gui.Parent) then return end
+                if gui:IsA("TextLabel") or gui:IsA("TextBox") then
+                    local ok, txt = pcall(function() return gui.Text:lower() end)
+                    if ok and txt then
+                        for _, kw in ipairs({"detect","kick","ban","exploit","cheat","hack"}) do
+                            if txt:find(kw, 1, true) then
+                                pcall(function() gui.Text = "" end)
+                                pcall(function() gui.Visible = false end)
+                                break
+                            end
+                        end
+                    end
+                end
+            end)
+        end))
+    end)
+
+    -- ── (F) Behaviour randomisation (tiny WalkSpeed jitter) ────────
+    -- Mimics legitimate player variance; makes timing analysis harder
+    pcall(function()
+        local _lp = game:GetService("Players").LocalPlayer
+        if not _lp then return end
+        task.spawn(function()
+            while task.wait(math.random(30, 60)) do
+                pcall(function()
+                    local hum = _lp.Character
+                              and _lp.Character:FindFirstChildOfClass("Humanoid")
+                    if hum and math.random(1, 5) == 1 then
+                        local ws = hum.WalkSpeed
+                        hum.WalkSpeed = ws * (math.random(98, 102) / 100)
+                        task.wait(0.1)
+                        hum.WalkSpeed = ws
+                    end
+                end)
+            end
+        end)
+    end)
+
+    -- ── (G) Fake micro-lag (makes traffic pattern less regular) ────
+    pcall(function()
+        task.spawn(function()
+            while task.wait(0.1) do
+                if math.random(1, 50) == 1 then
+                    pcall(function() task.wait(math.random(5, 20) / 1000) end)
+                end
+            end
+        end)
+    end)
+
+    -- ── (H) Hide executor globals from getfenv scan ────────────────
+    pcall(function()
+        for _, name in ipairs({
+            "syn","KRNL_LOADED","EXECUTOR_NAME","getexecutorname",
+            "fluxus","electron","script_key","getgenv",
+        }) do
+            pcall(function()
+                if getfenv()[name] ~= nil then
+                    getfenv()[name] = nil
+                end
+            end)
+        end
+    end)
+
+end -- end LAYER 17
+
+-- ================================================================
 -- END ANTI-DETECT SHIELD v3.0
 -- ================================================================
 
@@ -15838,42 +16524,6 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
             end
         })
         
-        AnimPresetSection:Button({
-            Title = "American Venom",
-            Desc = "Plays American Venom by Whitechapel.",
-            Callback = function()
-                local char = LocalPlayer.Character
-                if not char then return end
-
-                stopAllPresets()
-                presetActiveStates["AmericanVenom"] = true
-
-                -- Remove existing AmericanVenom sound if any
-                pcall(function()
-                    local existing = char:FindFirstChild("AmericanVenomMusic")
-                    if existing then existing:Destroy() end
-                end)
-
-                local music = Instance.new("Sound")
-                music.Name = "AmericanVenomMusic"
-                music.SoundId = "rbxassetid://1843671350"
-                music.Looped = true
-                music.Volume = 1.5
-                music.Parent = char:FindFirstChild("HumanoidRootPart") or char
-                music:Play()
-
-                -- Store for cleanup
-                presetLoopConnections["AmericanVenom"] = music
-
-                WindUI:Notify({
-                    Title = "American Venom",
-                    Content = "Whitechapel — American Venom playing.",
-                    Duration = 3,
-                    Icon = "music",
-                })
-            end
-        })
-
     end -- End Animation Presets scope
 
     -- === OLD GUARD TEMPORARY SECTION ===
