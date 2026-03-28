@@ -89,16 +89,7 @@ end)
 LocalPlayer.CharacterAdded:Connect(setupAntiKillBrick)
 if LocalPlayer.Character then task.spawn(setupAntiKillBrick, LocalPlayer.Character) end
 
--- Silent Background Operation
--- print("v1.9 Features Loaded")
-
 do
---[[
-    STREAMLINED ANTI-CHEAT BYPASS v3.0
-    
-    Lean bypass system - only essential hooks, zero background loops.
-    All dead code removed for maximum performance.
-]]
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
