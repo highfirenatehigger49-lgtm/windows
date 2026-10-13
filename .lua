@@ -1,11 +1,5 @@
 --!native
 
---[[
-    Arrey Hub - Guts & BlackPowder
-    Made by Yuki
-    Professional Obsidian Version
-]]
-
 -- ============================================================================
 --  FILE MAP (in execution order; search the section banner to jump to it)
 -- ============================================================================
@@ -31,7 +25,7 @@
 -- ============================================================================
 
 -- ===== LOAD OBSIDIAN LIBRARY =====
-local repo = "https://raw.githubusercontent.com/goldoomen310-cpu/W/refs/heads/main/"
+local repo = "https://raw.githubusercontent.com/highfirenatehigger49-lgtm/Assets/refs/heads/main/"
 -- W repo layout: Library.lua + tees (ThemeManager) + savemanager (SaveManager).
 local function loadWSrc(path)
     local src = game:HttpGet(repo .. path)
@@ -511,7 +505,7 @@ end
 initCentralZombieCache()
 -- ===== WINDOW CREATION =====
 local Arrey_LOGO_URLS = {
-    "https://raw.githubusercontent.com/goldoomen310-cpu/W/refs/heads/main/1c8f7992-d0b5-4ce9-bed4-3573f30d7040.png",
+    "https://github.com/highfirenatehigger49-lgtm/Assets/blob/main/71oY4SnbixL.webp?raw=true",
 }
 
 local Arrey_LOGO_VERSION = 2
@@ -633,7 +627,7 @@ end)
 
 local Window = Library:CreateWindow({
     Title = "Arrey Hub",
-    Footer = "by Yuki | Guts & BlackPowder",
+    Footer = "by Arrey | Guts & BlackPowder",
     Icon = Arrey_LOGO_URL,
     IconSize = UDim2.fromOffset(44, 44),
     Size = UDim2.fromOffset(920, 640),
@@ -1054,9 +1048,9 @@ task.spawn(function()
 end)
 
 -- Discord constants
-local discordInvite = "https://discord.gg/vBYZCGGyK6"
+local discordInvite = "https://discord.gg/gbqyys5eF5"
 local widgetUrl = "https://discord.com/api/guilds/1433658537027833969/widget.json"
-local TOTAL_MEMBERS = 3000
+local TOTAL_MEMBERS = 20
 
 local DiscordCard = DiscordSection:AddLabel({
     Text = "Arrey Hub | Balls 🔥\n🟢 Loading online...\n👥 " .. TOTAL_MEMBERS .. " Members\nEst. Oct 2025",
